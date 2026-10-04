@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Optional
 
 from packageurl import PackageURL
@@ -88,6 +89,123 @@ class VEX_Engine:
             write_observation_log_no_vex_statement(observation, previous_vex_statement)
 
 
+STATEMENT_SEMANTIC_FIELDS = (
+    "vulnerability_id",
+    "description",
+    "status",
+    "justification",
+    "impact",
+    "remediation",
+    "product_purl",
+    "component_purl",
+    "component_cyclonedx_bom_link",
+)
+
+
+def statements_semantically_equal(first: VEX_Statement, second: VEX_Statement) -> bool:
+    """Compare the semantic content of two statements, ignoring their primary keys."""
+    return all(getattr(first, field) == getattr(second, field) for field in STATEMENT_SEMANTIC_FIELDS)
+
+
+def find_vex_statement_for_observation(
+    observation: Observation, vex_statements: Sequence[VEX_Statement]
+) -> Optional[VEX_Statement]:
+    """Find the first statement that applies to the observation.
+
+    The lookup precedence is identical to VEX_Engine: CycloneDX BOM links,
+    product/component PURLs of the observation's product/branch and finally
+    product-only statements matching the observation's component PURL.
+    """
+    if observation.origin_component_cyclonedx_bom_link:
+        for vex_statement in vex_statements:
+            if (
+                vex_statement.component_cyclonedx_bom_link
+                and vex_statement.vulnerability_id == observation.vulnerability_id
+                and _match_cyclonedx_bom_links(vex_statement, observation)
+            ):
+                return vex_statement
+
+    product_purl = (
+        observation.branch.purl if observation.branch and observation.branch.purl else observation.product.purl
+    )
+    search_purl = _get_search_purl(product_purl) if product_purl else None
+    if search_purl:
+        for vex_statement in vex_statements:
+            if (
+                vex_statement.product_purl.lower().startswith(search_purl.lower())
+                and vex_statement.vulnerability_id == observation.vulnerability_id
+                and _match_purls(vex_statement, observation)
+            ):
+                return vex_statement
+
+    if observation.origin_component_purl:
+        component_search_purl = _get_search_purl(observation.origin_component_purl)
+        if component_search_purl:
+            for vex_statement in vex_statements:
+                if (
+                    vex_statement.product_purl.lower().startswith(component_search_purl.lower())
+                    and not vex_statement.component_purl
+                    and vex_statement.vulnerability_id == observation.vulnerability_id
+                    and _match_purl(vex_statement.product_purl, observation.origin_component_purl)
+                ):
+                    return vex_statement
+
+    return None
+
+
+def apply_vex_statement_with_previous(
+    observation: Observation,
+    vex_statement: VEX_Statement,
+    previous_vex_statement: Optional[VEX_Statement],
+    *,
+    statement_identity_ignored: bool = False,
+) -> None:
+    """Apply a matched statement to an observation and log/push on changes.
+
+    When statement_identity_ignored is set, a different statement primary key
+    with identical semantic content is treated as unchanged so that replacing
+    a document revision repoints the observation without redundant logs.
+    """
+    previous_current_status = observation.current_status
+    previous_vex_status = observation.vex_status
+    observation.vex_status = _get_secobserve_status(vex_statement.status)
+    observation.current_status = get_current_status(observation)
+
+    previous_current_vex_justification = observation.current_vex_justification
+    previous_vex_vex_justification = observation.vex_vex_justification
+    observation.vex_vex_justification = vex_statement.justification
+    observation.current_vex_justification = get_current_vex_justification(observation)
+
+    observation.vex_statement = vex_statement
+
+    if vex_statement.remediation:
+        observation.recommendation = vex_statement.remediation
+
+    statement_changed = (
+        previous_vex_statement is None or previous_vex_statement.pk != vex_statement.pk
+    ) and not statement_identity_ignored
+
+    # Write observation log and push to issue tracker if something has been changed
+    if (
+        previous_current_status != observation.current_status
+        or previous_vex_status != observation.vex_status
+        or statement_changed
+        or previous_vex_vex_justification != observation.vex_vex_justification
+        or previous_current_vex_justification != observation.current_vex_justification
+    ):
+        _write_observation_log(
+            observation,
+            vex_statement,
+            previous_current_status,
+            previous_current_vex_justification,
+        )
+        push_observation_to_issue_tracker(observation, get_current_user())
+    elif statement_identity_ignored:
+        # A revision replacement repoints the observation to an identical
+        # statement row without any other change; persist just the reference.
+        observation.save()
+
+
 def _apply_vex_statement_for_observation(
     vex_statement: VEX_Statement,
     observation: Observation,
@@ -97,36 +215,7 @@ def _apply_vex_statement_for_observation(
         _match_purls(vex_statement, observation)
         or (vex_statement.component_cyclonedx_bom_link and _match_cyclonedx_bom_links(vex_statement, observation))
     ):
-        previous_current_status = observation.current_status
-        previous_vex_status = observation.vex_status
-        observation.vex_status = _get_secobserve_status(vex_statement.status)
-        observation.current_status = get_current_status(observation)
-
-        previous_current_vex_justification = observation.current_vex_justification
-        previous_vex_vex_justification = observation.vex_vex_justification
-        observation.vex_vex_justification = vex_statement.justification
-        observation.current_vex_justification = get_current_vex_justification(observation)
-
-        observation.vex_statement = vex_statement
-
-        if vex_statement.remediation:
-            observation.recommendation = vex_statement.remediation
-
-        # Write observation and observation and push to issue tracker log if something has been changed
-        if (
-            previous_current_status != observation.current_status
-            or previous_vex_status != observation.vex_status
-            or previous_vex_statement != observation.vex_statement
-            or previous_vex_vex_justification != observation.vex_vex_justification
-            or previous_current_vex_justification != observation.current_vex_justification
-        ):
-            _write_observation_log(
-                observation,
-                vex_statement,
-                previous_current_status,
-                previous_current_vex_justification,
-            )
-            push_observation_to_issue_tracker(observation, get_current_user())
+        apply_vex_statement_with_previous(observation, vex_statement, previous_vex_statement)
         return True
 
     return False
@@ -265,6 +354,9 @@ def write_observation_log_no_vex_statement(
     observation: Observation,
     previous_vex_statement: Optional[VEX_Statement],
 ) -> None:
+    # Detach the statement before deleting/replacing it so that the statement's
+    # pre_delete signal does not process the observation a second time.
+    observation.vex_statement = None
     observation.vex_status = ""
     previous_status = observation.current_status
     observation.current_status = get_current_status(observation)
@@ -313,64 +405,7 @@ def write_observation_log_no_vex_statement(
     )
 
 
-def apply_vex_statements_after_import(product_purls: set[str], vex_statements: set[VEX_Statement]) -> None:
-    # Alternative 1, apply VEX statements with PURLs
-    # Step 1.1, apply VEX statement to products
-    _apply_vex_to_product(product_purls, vex_statements)
-
-    # Step 1.2, apply VEX statement without component_purl to components
-    _apply_vex_without_component_purl(vex_statements)
-
-    # Alternative 2, apply VEX statements with BOM-Links
-    _apply_vex_with_bom_link(vex_statements)
-
-
-def _apply_vex_to_product(product_purls: set[str], vex_statements: set[VEX_Statement]) -> None:
-    for product_purl in product_purls:
-        search_purl = _get_search_purl(product_purl)
-        if not search_purl:
-            continue
-
-        products = set(Product.objects.filter(purl__startswith=search_purl))
-        branches = Branch.objects.filter(purl__startswith=search_purl)
-        for branch in branches:
-            products.add(branch.product)
-
-        for product in products:
-            observations = Observation.objects.filter(product=product)
-            for observation in observations:
-                for vex_statement in vex_statements:
-                    _apply_vex_statement_for_observation(vex_statement, observation, observation.vex_statement)
-
-
-def _apply_vex_without_component_purl(vex_statements: set[VEX_Statement]) -> None:
-    for vex_statement in vex_statements:
-        if vex_statement.product_purl and not vex_statement.component_purl:
-            search_purl = _get_search_purl(vex_statement.product_purl)
-            if not search_purl:
-                continue
-
-            observations = Observation.objects.filter(origin_component_purl__startswith=search_purl)
-            for observation in observations:
-                _apply_vex_statement_for_observation(vex_statement, observation, observation.vex_statement)
-
-
-def _apply_vex_with_bom_link(vex_statements: set[VEX_Statement]) -> None:
-    bom_links: dict[str, list[VEX_Statement]] = {}
-    for vex_statement in vex_statements:
-        if vex_statement.component_cyclonedx_bom_link:
-            if bom_links.get(vex_statement.component_cyclonedx_bom_link):
-                bom_links.get(vex_statement.component_cyclonedx_bom_link, []).append(vex_statement)
-            else:
-                bom_links[vex_statement.component_cyclonedx_bom_link] = [vex_statement]
-
-    observations = Observation.objects.filter(origin_component_cyclonedx_bom_link__in=bom_links)
-    for observation in observations:
-        for vex_statement in bom_links.get(observation.origin_component_cyclonedx_bom_link, []):
-            _apply_vex_statement_for_observation(vex_statement, observation, observation.vex_statement)
-
-
-def _get_search_purl(purl_string: str) -> Optional[str]:
+def get_search_purl(purl_string: str) -> Optional[str]:
     try:
         purl = PackageURL.from_string(purl_string)
     except ValueError:

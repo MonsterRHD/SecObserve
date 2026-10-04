@@ -144,6 +144,7 @@ class VEX_Document(Model):
     initial_release_date = DateTimeField()
     author = CharField(max_length=255)
     role = CharField(max_length=255, blank=True)
+    content_hash = CharField(max_length=256, blank=True, default="")
 
     class Meta:
         unique_together = (

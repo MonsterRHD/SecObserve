@@ -5,8 +5,11 @@ from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from application.core.api.serializers_helpers import validate_purl
-from application.vex.models import VEX_Document, VEX_Statement
-from application.vex.services.vex_engine import apply_vex_statements_after_import
+from application.vex.services.vex_candidate import (
+    ParsedVEXDocument,
+    StatementData,
+    parse_release_date,
+)
 from application.vex.types import (
     CycloneDX_Analysis_State,
     VEX_Document_Type,
@@ -24,28 +27,22 @@ class CycloneDX_Analysis:
     last_updated: str = ""
 
 
-@dataclass
-class VexStatementData:
-    vulnerability_id: str
-    description: str
-    status: str
-    justification: str
-    impact: str
-    remediation: str
-    product_purl: str
-    component_purl: str = ""
-    component_cyclonedx_bom_link: str = ""
+def extract_cyclonedx_document(data: dict) -> ParsedVEXDocument:
+    """Validate a CycloneDX VEX document and build an in-memory candidate.
+
+    No database objects are created or modified here.
+    """
+    cyclonedx_document = _extract_document_metadata(data)
+
+    product_purls, vex_statements = _process_vex_statements(data)
+
+    cyclonedx_document.statements = vex_statements
+    cyclonedx_document.product_purls = product_purls
+
+    return cyclonedx_document
 
 
-def parse_cyclonedx_data(data: dict) -> None:
-    cyclonedx_document = _create_cyclonedx_document(data)
-
-    product_purls, vex_statements = _process_vex_statements(data, cyclonedx_document)
-
-    apply_vex_statements_after_import(product_purls, vex_statements)
-
-
-def _create_cyclonedx_document(data: dict) -> VEX_Document:
+def _extract_document_metadata(data: dict) -> ParsedVEXDocument:
     document_id = data.get("serialNumber")
     if not document_id:
         raise ValidationError("serialNumber is missing")
@@ -54,9 +51,16 @@ def _create_cyclonedx_document(data: dict) -> VEX_Document:
 
     metadata = data.get("metadata", {})
 
-    timestamp = metadata.get("timestamp")
-    if not timestamp:
+    timestamp_raw = metadata.get("timestamp")
+    if timestamp_raw:
+        timestamp = parse_release_date(timestamp_raw, "metadata/timestamp")
+        has_source_release_dates = True
+    else:
+        # Keep the historic server side default for the stored field, but exclude
+        # the generated timestamp from the hash so that repeated uploads of the
+        # same file without timestamp remain idempotent.
         timestamp = timezone.now()
+        has_source_release_dates = False
 
     author = None
     # Prefer authors list if available
@@ -75,13 +79,7 @@ def _create_cyclonedx_document(data: dict) -> VEX_Document:
     if not author:
         author = "Unknown"
 
-    try:
-        cyclonedx_document = VEX_Document.objects.get(document_id=document_id, author=author)
-        cyclonedx_document.delete()
-    except VEX_Document.DoesNotExist:
-        pass
-
-    cyclonedx_document = VEX_Document.objects.create(
+    return ParsedVEXDocument(
         type=VEX_Document_Type.VEX_DOCUMENT_TYPE_CYCLONEDX,
         document_id=document_id,
         version=version,
@@ -89,12 +87,11 @@ def _create_cyclonedx_document(data: dict) -> VEX_Document:
         current_release_date=timestamp,
         author=author,
         role="",
+        has_source_release_dates=has_source_release_dates,
     )
 
-    return cyclonedx_document
 
-
-def _process_vex_statements(data: dict, cyclonedx_document: VEX_Document) -> tuple[set[str], set[VEX_Statement]]:
+def _process_vex_statements(data: dict) -> tuple[set[str], list[StatementData]]:
     vulnerabilities = data.get("vulnerabilities", [])
     if not vulnerabilities:
         raise ValidationError("CycloneDX document doesn't contain any vulnerabilities")
@@ -108,7 +105,7 @@ def _process_vex_statements(data: dict, cyclonedx_document: VEX_Document) -> tup
         validate_purl(product_purl)
 
     product_purls: set[str] = set()
-    vex_statements: set[VEX_Statement] = set()
+    vex_statements: list[StatementData] = []
 
     vulnerability_counter = 0
     for vulnerability in vulnerabilities:
@@ -143,11 +140,10 @@ def _process_vex_statements(data: dict, cyclonedx_document: VEX_Document) -> tup
         affects = vulnerability.get("affects", [])
         if not affects:
             # General statement for the product
-            _create_vex_statement(
-                cyclonedx_document,
+            _append_statement(
                 product_purls,
                 vex_statements,
-                data=VexStatementData(
+                data=StatementData(
                     vulnerability_id=vulnerability_id,
                     description=description,
                     status=vex_status,
@@ -161,11 +157,10 @@ def _process_vex_statements(data: dict, cyclonedx_document: VEX_Document) -> tup
             raise ValidationError(f"affects[{vulnerability_counter}] is not a list")
         else:
             _process_affected_components(
-                document=cyclonedx_document,
                 product_purls=product_purls,
                 vex_statements=vex_statements,
                 vulnerability_counter=vulnerability_counter,
-                vex_data=VexStatementData(
+                vex_data=StatementData(
                     vulnerability_id=vulnerability_id,
                     description=description,
                     status=vex_status,
@@ -250,11 +245,10 @@ def _build_remediation_text(response: Optional[list[str]], recommendation: str) 
 
 def _process_affected_components(
     *,
-    document: VEX_Document,
     product_purls: set[str],
-    vex_statements: set[VEX_Statement],
+    vex_statements: list[StatementData],
     vulnerability_counter: int,
-    vex_data: VexStatementData,
+    vex_data: StatementData,
     affects: list,
     components_map: dict,
 ) -> None:
@@ -269,7 +263,7 @@ def _process_affected_components(
 
         if ref.startswith("urn:cdx:"):
             component_purl = ""
-            vex_data.product_purl = ""
+            product_purl = ""
             component_cyclonedx_bom_link = ref
         else:
             component_cyclonedx_bom_link = ""
@@ -289,18 +283,19 @@ def _process_affected_components(
             if not vex_data.product_purl:
                 raise ValidationError("metadata/component/purl is missing for VEX data inside an SBOM")
 
-        _create_vex_statement(
-            document,
+            product_purl = vex_data.product_purl
+
+        _append_statement(
             product_purls,
             vex_statements,
-            data=VexStatementData(
+            data=StatementData(
                 vulnerability_id=vex_data.vulnerability_id,
                 description=vex_data.description,
                 status=vex_data.status,
                 justification=vex_data.justification,
                 impact=vex_data.impact,
                 remediation=vex_data.remediation,
-                product_purl=vex_data.product_purl,
+                product_purl=product_purl,
                 component_purl=component_purl,
                 component_cyclonedx_bom_link=component_cyclonedx_bom_link,
             ),
@@ -309,24 +304,10 @@ def _process_affected_components(
         affected_counter += 1
 
 
-def _create_vex_statement(
-    document: VEX_Document,
+def _append_statement(
     product_purls: set[str],
-    vex_statements: set[VEX_Statement],
-    data: VexStatementData,
+    vex_statements: list[StatementData],
+    data: StatementData,
 ) -> None:
-    vex_statement = VEX_Statement(
-        document=document,
-        vulnerability_id=data.vulnerability_id,
-        description=data.description,
-        status=data.status,
-        justification=data.justification,
-        impact=data.impact,
-        remediation=data.remediation,
-        product_purl=data.product_purl,
-        component_purl=data.component_purl,
-        component_cyclonedx_bom_link=data.component_cyclonedx_bom_link,
-    )
-    vex_statement.save()
-    vex_statements.add(vex_statement)
+    vex_statements.append(data)
     product_purls.add(data.product_purl)

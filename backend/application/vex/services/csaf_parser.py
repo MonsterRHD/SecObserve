@@ -3,8 +3,11 @@ from dataclasses import dataclass
 from rest_framework.exceptions import ValidationError
 
 from application.core.api.serializers_helpers import validate_purl
-from application.vex.models import VEX_Document, VEX_Statement
-from application.vex.services.vex_engine import apply_vex_statements_after_import
+from application.vex.services.vex_candidate import (
+    ParsedVEXDocument,
+    StatementData,
+    parse_release_date,
+)
 from application.vex.types import CSAF_Status, VEX_Document_Type, VEX_Status
 
 
@@ -20,8 +23,12 @@ class Product_Component:
     component_purl: str = ""
 
 
-def parse_csaf_data(data: dict) -> None:
-    csaf_document = _create_csaf_document(data)
+def extract_csaf_document(data: dict) -> ParsedVEXDocument:
+    """Validate a CSAF VEX document and build an in-memory candidate.
+
+    No database objects are created or modified here.
+    """
+    csaf_document = _extract_document_metadata(data)
 
     products: dict[str, str] = {}
     product_tree: dict = data.get("product_tree", {})
@@ -31,12 +38,15 @@ def parse_csaf_data(data: dict) -> None:
 
     relationships: dict[str, Relationship] = _process_relationships(product_tree)
 
-    product_purls, vex_statements = _process_vulnerabilities(data, csaf_document, products, relationships)
+    product_purls, vex_statements = _process_vulnerabilities(data, products, relationships)
 
-    apply_vex_statements_after_import(product_purls, vex_statements)
+    csaf_document.statements = vex_statements
+    csaf_document.product_purls = product_purls
+
+    return csaf_document
 
 
-def _create_csaf_document(data: dict) -> VEX_Document:
+def _extract_document_metadata(data: dict) -> ParsedVEXDocument:
     namespace = data.get("document", {}).get("publisher", {}).get("namespace")
     if not namespace:
         raise ValidationError("document/publisher/namespace is missing")
@@ -47,33 +57,29 @@ def _create_csaf_document(data: dict) -> VEX_Document:
     version = data.get("document", {}).get("tracking", {}).get("version")
     if not version:
         raise ValidationError("document/tracking/version is missing")
-    initial_release_date = data.get("document", {}).get("tracking", {}).get("initial_release_date")
-    if not initial_release_date:
+    initial_release_date_raw = data.get("document", {}).get("tracking", {}).get("initial_release_date")
+    if not initial_release_date_raw:
         raise ValidationError("document/tracking/initial_release_date is missing")
-    current_release_date = data.get("document", {}).get("tracking", {}).get("current_release_date")
-    if not current_release_date:
-        current_release_date = initial_release_date
+    current_release_date_raw = data.get("document", {}).get("tracking", {}).get("current_release_date")
+    if not current_release_date_raw:
+        current_release_date_raw = initial_release_date_raw
     author = data.get("document", {}).get("publisher", {}).get("name")
     if not author:
         raise ValidationError("author is missing")
     role = data.get("document", {}).get("publisher", {}).get("category")
 
-    try:
-        csaf_document = VEX_Document.objects.get(document_id=document_id, author=author)
-        csaf_document.delete()
-    except VEX_Document.DoesNotExist:
-        pass
-    csaf_document = VEX_Document.objects.create(
+    initial_release_date = parse_release_date(initial_release_date_raw, "document/tracking/initial_release_date")
+    current_release_date = parse_release_date(current_release_date_raw, "document/tracking/current_release_date")
+
+    return ParsedVEXDocument(
         type=VEX_Document_Type.VEX_DOCUMENT_TYPE_CSAF,
         document_id=document_id,
-        version=version,
+        version=str(version),
         initial_release_date=initial_release_date,
         current_release_date=current_release_date,
         author=author,
         role=role,
     )
-
-    return csaf_document
 
 
 def _find_products_in_branches(branches: list, products: dict[str, str]) -> None:
@@ -129,10 +135,9 @@ def _process_relationships(product_tree: dict) -> dict[str, Relationship]:
 
 def _process_vulnerabilities(
     data: dict,
-    csaf_document: VEX_Document,
     products: dict[str, str],
     relationships: dict[str, Relationship],
-) -> tuple[set[str], set[VEX_Statement]]:
+) -> tuple[set[str], list[StatementData]]:
     vulnerabilities = data.get("vulnerabilities", [])
     if not vulnerabilities:
         raise ValidationError("CSAF document doesn't contain any vulnerabilities")
@@ -140,7 +145,7 @@ def _process_vulnerabilities(
         raise ValidationError("vulnerabilities is not a list")
 
     product_purls: set[str] = set()
-    vex_statements: set[VEX_Statement] = set()
+    vex_statements: list[StatementData] = []
 
     for vulnerability in vulnerabilities:
         vulnerability_id = vulnerability.get("cve")
@@ -159,64 +164,60 @@ def _process_vulnerabilities(
         known_affected = product_status.get(CSAF_Status.CSAF_STATUS_AFFECTED, [])
         for product_id in known_affected:
             product_component = _get_product_component(product_id, products, relationships)
-            vex_statement = VEX_Statement(
-                document=csaf_document,
-                vulnerability_id=vulnerability_id,
-                description=_get_description(vulnerability),
-                status=VEX_Status.VEX_STATUS_AFFECTED,
-                remediation=_get_remediation(vulnerability, product_id),
-                product_purl=product_component.product_purl,
-                component_purl=product_component.component_purl,
+            vex_statements.append(
+                StatementData(
+                    vulnerability_id=vulnerability_id,
+                    description=_get_description(vulnerability),
+                    status=VEX_Status.VEX_STATUS_AFFECTED,
+                    remediation=_get_remediation(vulnerability, product_id),
+                    product_purl=product_component.product_purl,
+                    component_purl=product_component.component_purl,
+                )
             )
-            vex_statement.save()
-            vex_statements.add(vex_statement)
             product_purls.add(product_component.product_purl)
 
         known_not_affected = product_status.get(CSAF_Status.CSAF_STATUS_NOT_AFFECTED, [])
         for product_id in known_not_affected:
             product_component = _get_product_component(product_id, products, relationships)
-            vex_statement = VEX_Statement(
-                document=csaf_document,
-                vulnerability_id=vulnerability_id,
-                description=_get_description(vulnerability),
-                status=VEX_Status.VEX_STATUS_NOT_AFFECTED,
-                justification=_get_justification(vulnerability, product_id),
-                impact=_get_impact(vulnerability, product_id),
-                product_purl=product_component.product_purl,
-                component_purl=product_component.component_purl,
+            vex_statements.append(
+                StatementData(
+                    vulnerability_id=vulnerability_id,
+                    description=_get_description(vulnerability),
+                    status=VEX_Status.VEX_STATUS_NOT_AFFECTED,
+                    justification=_get_justification(vulnerability, product_id),
+                    impact=_get_impact(vulnerability, product_id),
+                    product_purl=product_component.product_purl,
+                    component_purl=product_component.component_purl,
+                )
             )
-            vex_statement.save()
-            vex_statements.add(vex_statement)
             product_purls.add(product_component.product_purl)
 
         under_investigation = product_status.get(CSAF_Status.CSAF_STATUS_UNDER_INVESTIGATION, [])
         for product_id in under_investigation:
             product_component = _get_product_component(product_id, products, relationships)
-            vex_statement = VEX_Statement(
-                document=csaf_document,
-                vulnerability_id=vulnerability_id,
-                description=_get_description(vulnerability),
-                status=VEX_Status.VEX_STATUS_UNDER_INVESTIGATION,
-                product_purl=product_component.product_purl,
-                component_purl=product_component.component_purl,
+            vex_statements.append(
+                StatementData(
+                    vulnerability_id=vulnerability_id,
+                    description=_get_description(vulnerability),
+                    status=VEX_Status.VEX_STATUS_UNDER_INVESTIGATION,
+                    product_purl=product_component.product_purl,
+                    component_purl=product_component.component_purl,
+                )
             )
-            vex_statement.save()
-            vex_statements.add(vex_statement)
             product_purls.add(product_component.product_purl)
 
         fixed = product_status.get(CSAF_Status.CSAF_STATUS_FIXED, [])
         for product_id in fixed:
             product_component = _get_product_component(product_id, products, relationships)
-            vex_statement = VEX_Statement(
-                document=csaf_document,
-                vulnerability_id=vulnerability_id,
-                description=_get_description(vulnerability),
-                status=VEX_Status.VEX_STATUS_FIXED,
-                product_purl=product_component.product_purl,
-                component_purl=product_component.component_purl,
+            vex_statements.append(
+                StatementData(
+                    vulnerability_id=vulnerability_id,
+                    description=_get_description(vulnerability),
+                    status=VEX_Status.VEX_STATUS_FIXED,
+                    product_purl=product_component.product_purl,
+                    component_purl=product_component.component_purl,
+                )
             )
-            vex_statement.save()
-            vex_statements.add(vex_statement)
             product_purls.add(product_component.product_purl)
 
     return product_purls, vex_statements

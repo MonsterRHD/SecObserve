@@ -4,9 +4,10 @@ from typing import Optional
 from django.core.files import File
 from rest_framework.exceptions import ValidationError
 
-from application.vex.services.csaf_parser import parse_csaf_data
-from application.vex.services.cyclonedx_parser import parse_cyclonedx_data
-from application.vex.services.openvex_parser import parse_openvex_data
+from application.vex.services.csaf_parser import extract_csaf_document
+from application.vex.services.cyclonedx_parser import extract_cyclonedx_document
+from application.vex.services.openvex_parser import extract_openvex_document
+from application.vex.services.vex_publisher import publish_vex_document
 from application.vex.types import VEX_Document_Type
 
 
@@ -19,12 +20,16 @@ def import_vex(vex_file: File) -> None:
     if not vex_type:
         raise ValidationError("File is not a supported VEX type")
 
+    # Parse and validate the complete candidate before any database write.
     if vex_type == VEX_Document_Type.VEX_DOCUMENT_TYPE_OPENVEX:
-        parse_openvex_data(data)
+        candidate = extract_openvex_document(data)
     elif vex_type == VEX_Document_Type.VEX_DOCUMENT_TYPE_CSAF:
-        parse_csaf_data(data)
-    elif vex_type == VEX_Document_Type.VEX_DOCUMENT_TYPE_CYCLONEDX:
-        parse_cyclonedx_data(data)
+        candidate = extract_csaf_document(data)
+    else:
+        candidate = extract_cyclonedx_document(data)
+
+    # Publish according to document identity and revision order.
+    publish_vex_document(candidate)
 
 
 def _get_json_data(vex_file: File) -> Optional[dict]:
