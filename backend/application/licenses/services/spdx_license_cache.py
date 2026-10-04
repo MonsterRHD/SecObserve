@@ -3,6 +3,7 @@ from typing import Optional
 
 from application.licenses.models import License
 from application.licenses.queries.license import get_license_by_spdx_id
+from application.licenses.queries.license_generation import get_current_generation_pk
 
 SPDX_ID_REGEX = re.compile("^[A-Za-z0-9-.+:]+$")
 
@@ -13,6 +14,11 @@ class SPDXLicenseCache:
 
     def __init__(self) -> None:
         self.cache: dict[str, License | str] = {}
+        # The generation is captured once per cache instance. A product import
+        # creates one cache for its whole run, so it keeps reading the same
+        # complete generation even if a newer generation is published in
+        # between; it can never read parts of two generations.
+        self.generation_id = get_current_generation_pk()
 
     def get(self, spdx_id: str) -> Optional[License]:
         if not SPDX_ID_REGEX.match(spdx_id):
@@ -22,7 +28,7 @@ class SPDXLicenseCache:
         if spdx_license:
             return spdx_license if isinstance(spdx_license, License) else None
 
-        spdx_license = get_license_by_spdx_id(spdx_id)
+        spdx_license = get_license_by_spdx_id(spdx_id, self.generation_id)
         if spdx_license:
             self.cache[spdx_id] = spdx_license
             return spdx_license

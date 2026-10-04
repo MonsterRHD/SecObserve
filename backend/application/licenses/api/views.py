@@ -354,9 +354,15 @@ class LicenseComponentEvidenceViewSet(GenericViewSet, ListModelMixin, RetrieveMo
 class LicenseViewSet(GenericViewSet, ListModelMixin, RetrieveModelMixin):
     serializer_class = LicenseSerializer
     filterset_class = LicenseFilter
-    queryset = License.objects.all()
+    queryset = License.objects.none()
     filter_backends = [SearchFilter, DjangoFilterBackend]
     search_fields = ["spdx_id", "name"]
+
+    def get_queryset(self) -> QuerySet[License]:
+        # Only the licenses of the current generation are visible. License rows
+        # of generations that are being prepared or have been superseded must
+        # never show up in the API.
+        return License.objects.current()
 
     def get_serializer_class(self) -> type[BaseSerializer]:
         if self.action == "list":
@@ -424,7 +430,7 @@ class LicenseGroupViewSet(ModelViewSet):
             raise NotFound("License group not found")
 
         license_id = request_serializer.validated_data.get("license")
-        license_to_be_added = get_license(license_id)
+        license_to_be_added = License.objects.current().filter(id=license_id).first()
         if not license_to_be_added:
             raise ValidationError(f"License {license_id} not found")
 
@@ -449,7 +455,7 @@ class LicenseGroupViewSet(ModelViewSet):
             raise NotFound("License group not found")
 
         license_id = request_serializer.validated_data.get("license")
-        license_to_be_removed = get_license(license_id)
+        license_to_be_removed = License.objects.current().filter(id=license_id).first()
         if not license_to_be_removed:
             raise ValidationError(f"License {license_id} not found")
 

@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Optional
 
 from dirtyfields import DirtyFieldsMixin
 from django.core.validators import MaxValueValidator, MinValueValidator
@@ -16,8 +16,10 @@ from django.db.models import (
     Manager,
     ManyToManyField,
     Model,
+    PositiveIntegerField,
     QuerySet,
     TextField,
+    UniqueConstraint,
 )
 from django.utils import timezone
 
@@ -30,14 +32,105 @@ from application.licenses.types import (
 )
 
 
+class License_Generation(Model):
+    """
+    An identifiable generation of the SPDX license directory.
+
+    Only one generation at a time has the status CURRENT. A new generation is
+    prepared (status PREPARING) with its own set of License rows and becomes
+    CURRENT in a single transaction. Readers always see the licenses of the
+    CURRENT generation only, so a refresh that fails in any step leaves the
+    previous complete generation untouched.
+    """
+
+    STATUS_PREPARING = "preparing"
+    STATUS_CURRENT = "current"
+    STATUS_SUPERSEDED = "superseded"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_PREPARING, STATUS_PREPARING),
+        (STATUS_CURRENT, STATUS_CURRENT),
+        (STATUS_SUPERSEDED, STATUS_SUPERSEDED),
+        (STATUS_FAILED, STATUS_FAILED),
+    ]
+
+    TRIGGER_INITIAL = "initial"
+    TRIGGER_REFRESH = "refresh"
+
+    sequence = PositiveIntegerField(unique=True)
+    status = CharField(max_length=16, choices=STATUS_CHOICES)
+    trigger = CharField(max_length=16, blank=True, default="")
+    license_count = PositiveIntegerField(default=0)
+    checksum = CharField(max_length=64, blank=True, default="")
+    spdx_release_date = CharField(max_length=32, blank=True, default="")
+    error_message = CharField(max_length=2048, blank=True, default="")
+    started_at = DateTimeField(auto_now_add=True)
+    published_at = DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [Index(fields=["status"])]
+        ordering = ["-sequence"]
+
+    def __str__(self) -> str:
+        return f"License generation {self.sequence} ({self.status})"
+
+
+def _get_default_license_generation_pk() -> Optional[int]:
+    # Used as the default of License.generation so that objects created without
+    # an explicit generation (e.g. via loaddata) are attached to the current
+    # generation. Imported as a function to avoid circular model imports.
+    try:
+        from application.licenses.queries.license_generation import (
+            get_current_generation_pk,
+        )
+
+        return get_current_generation_pk()
+    except Exception:  # pylint: disable=broad-except
+        # The database may not be available/migrated yet (model construction at
+        # import time). A missing generation is enforced by NOT NULL at save.
+        return None
+
+
+class LicenseQuerySet(QuerySet):
+    def current(self) -> "LicenseQuerySet":
+        return self.filter(generation__status=License_Generation.STATUS_CURRENT)
+
+    def for_generation(self, generation_id: int) -> "LicenseQuerySet":
+        return self.filter(generation_id=generation_id)
+
+
+class LicenseManager(Manager):
+    def get_queryset(self) -> LicenseQuerySet:
+        return LicenseQuerySet(self.model, using=self._db)
+
+    def current(self) -> LicenseQuerySet:
+        return self.get_queryset().current()
+
+    def for_generation(self, generation_id: int) -> LicenseQuerySet:
+        return self.get_queryset().for_generation(generation_id)
+
+
 class License(Model):
-    spdx_id = CharField(max_length=255, unique=True)
+    objects = LicenseManager()
+
+    spdx_id = CharField(max_length=255)
     name = CharField(max_length=255)
     reference = TextField(max_length=2048, blank=True)
     is_osi_approved = BooleanField(null=True)
     is_deprecated = BooleanField(null=True)
 
+    generation = ForeignKey(
+        License_Generation,
+        related_name="licenses",
+        on_delete=PROTECT,
+        default=_get_default_license_generation_pk,
+    )
+    is_custom = BooleanField(default=False)
+
     class Meta:
+        constraints = [
+            UniqueConstraint(fields=["spdx_id", "generation"], name="unique_spdx_id_per_generation"),
+        ]
         indexes = [Index(fields=["name"])]
 
     def __str__(self) -> str:

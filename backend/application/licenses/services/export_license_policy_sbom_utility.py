@@ -56,7 +56,7 @@ def _create_license_policy_export(license_policy: License_Policy) -> License_Pol
         if license_string.startswith("spdx_"):
             license_ids.add(license_string.replace("spdx_", ""))
 
-    spdx_licenses = License.objects.filter(spdx_id__in=license_ids)
+    spdx_licenses = License.objects.current().filter(spdx_id__in=license_ids)
     spdx_license_dict = {license.spdx_id: license for license in spdx_licenses}
 
     for license_string, evaluation_result in license_evaluation_results.items():
