@@ -1,14 +1,29 @@
+import json
 from unittest.mock import patch
 
-from requests import Response
-from requests.exceptions import HTTPError
-
 from application.core.types import Severity, Status
-from application.issue_tracker.issue_trackers.base_issue_tracker import Issue
+from application.issue_tracker.issue_trackers.base_issue_tracker import (
+    Issue,
+    Issue_State,
+    IssueTrackerDeterministicError,
+    IssueTrackerUncertainError,
+)
 from application.issue_tracker.issue_trackers.github_issue_tracker import (
     GitHubIssueTracker,
 )
 from unittests.base_test_case import BaseTestCase
+
+REQUEST_MODULE = "application.issue_tracker.issue_trackers.github_issue_tracker.request_issue_tracker"
+
+
+class FakeResponse:
+    def __init__(self, payload, status_code: int = 200, reason: str = "OK"):
+        self._payload = payload
+        self.status_code = status_code
+        self.reason = reason
+
+    def json(self):
+        return self._payload
 
 
 class TestGitHubIssueTracker(BaseTestCase):
@@ -21,341 +36,147 @@ class TestGitHubIssueTracker(BaseTestCase):
         self.observation_1.product.issue_tracker_labels = "label_1, label_2"
         self.observation_1.product.issue_tracker_api_key = "api_key_1"
 
-    @patch("requests.post")
-    def test_create_issue(self, post_mock):
-        class MockResponse:
-            def raise_for_status(self):
-                pass
+    @patch(REQUEST_MODULE)
+    def test_create_issue(self, request_mock):
+        request_mock.return_value = FakeResponse({"number": "gh_1"})
 
-            def json(self):
-                return {"number": "gh_1"}
+        issue_id = GitHubIssueTracker().create_issue(self.observation_1)
 
-        response = MockResponse()
-        post_mock.return_value = response
-
-        issue_tracker = GitHubIssueTracker()
-        issue_id = issue_tracker.create_issue(self.observation_1)
-
-        post_mock.assert_called_once_with(
-            url="https://api.github.com/repos/gh_project_1/issues",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": "Bearer api_key_1",
-            },
-            data='{"title": "Critical vulnerability: \\"observation_1\\"", "body": "description_1\\n\\n**Branch:** branch_1\\n\\n**SecObserve observation:** [/#/observations/1/show](/#/observations/1/show)", "labels": ["label_1", "label_2"]}',
-            timeout=60,
-        )
         self.assertEqual("gh_1", issue_id)
+        _, kwargs = request_mock.call_args
+        self.assertEqual("POST", request_mock.call_args.args[0])
+        self.assertEqual("https://api.github.com/repos/gh_project_1/issues", kwargs["url"])
+        data = json.loads(kwargs["data"])
+        self.assertEqual('Critical vulnerability: "observation_1"', data["title"])
+        self.assertIn("<!-- secobserveobservation1 -->", data["body"])
+        self.assertEqual(["label_1", "label_2"], data["labels"])
 
-    @patch("requests.post")
-    def test_create_issue_exception(self, post_mock):
-        response = Response()
-        response.status_code = 500
-        response.reason = "unknown reason"
-        response.url = "https://api.github.com/repos/gh_project_1/issues"
-        post_mock.return_value = response
-        with self.assertRaises(HTTPError) as e:
-            issue_tracker = GitHubIssueTracker()
-            issue_tracker.create_issue(self.observation_1)
+    @patch(REQUEST_MODULE)
+    def test_get_issue_not_found(self, request_mock):
+        request_mock.return_value = FakeResponse({}, status_code=404, reason="Not Found")
+        self.assertIsNone(GitHubIssueTracker().get_issue(self.observation_1.product, "gh_1"))
+
+    @patch(REQUEST_MODULE)
+    def test_get_issue_success(self, request_mock):
+        request_mock.return_value = FakeResponse(
+            {
+                "number": "gh_1",
+                "title": "title_1",
+                "body": "description_1",
+                "state": "closed",
+                "labels": [{"name": "label_1"}, {"name": "label_2"}],
+            }
+        )
+
+        issue = GitHubIssueTracker().get_issue(self.observation_1.product, "gh_1")
 
         self.assertEqual(
-            "500 Server Error: unknown reason for url: https://api.github.com/repos/gh_project_1/issues",
-            str(e.exception),
-        )
-        post_mock.assert_called_once_with(
-            url="https://api.github.com/repos/gh_project_1/issues",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": "Bearer api_key_1",
-            },
-            data='{"title": "Critical vulnerability: \\"observation_1\\"", "body": "description_1\\n\\n**Branch:** branch_1\\n\\n**SecObserve observation:** [/#/observations/1/show](/#/observations/1/show)", "labels": ["label_1", "label_2"]}',
-            timeout=60,
-        )
-
-    @patch("requests.get")
-    def test_get_issue_exception(self, get_mock):
-        response = Response()
-        response.status_code = 500
-        response.reason = "unknown reason"
-        response.url = "https://api.github.com/repos/gh_project_1/issues/gh_1"
-        get_mock.return_value = response
-        with self.assertRaises(HTTPError) as e:
-            issue_tracker = GitHubIssueTracker()
-            issue_tracker.get_issue(self.observation_1.product, "gh_1")
-
-        self.assertEqual(
-            "500 Server Error: unknown reason for url: https://api.github.com/repos/gh_project_1/issues/gh_1",
-            str(e.exception),
-        )
-        get_mock.assert_called_once_with(
-            url="https://api.github.com/repos/gh_project_1/issues/gh_1",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": "Bearer api_key_1",
-            },
-            timeout=60,
-        )
-
-    @patch("requests.get")
-    def test_get_issue_not_found(self, get_mock):
-        get_mock.return_value.status_code = 404
-        issue_tracker = GitHubIssueTracker()
-        issue = issue_tracker.get_issue(self.observation_1.product, "gh_1")
-        self.assertIsNone(issue)
-        get_mock.assert_called_once_with(
-            url="https://api.github.com/repos/gh_project_1/issues/gh_1",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": "Bearer api_key_1",
-            },
-            timeout=60,
-        )
-
-    @patch("requests.get")
-    def test_get_issue_success(self, get_mock):
-        get_mock.return_value.status_code = 200
-        get_mock.return_value.json.return_value = {
-            "number": "gh_1",
-            "title": "title_1",
-            "body": "description_1",
-            "labels": [{"name": "label_1"}, {"name": "label_2"}],
-        }
-        issue_tracker = GitHubIssueTracker()
-        issue = issue_tracker.get_issue(self.observation_1.product, "gh_1")
-        expected_issue = Issue(
-            id="gh_1",
-            title="title_1",
-            description="description_1",
-            labels="label_1,label_2",
-        )
-        self.assertEqual(expected_issue, issue)
-        get_mock.assert_called_once_with(
-            url="https://api.github.com/repos/gh_project_1/issues/gh_1",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": "Bearer api_key_1",
-            },
-            timeout=60,
-        )
-
-    @patch("requests.patch")
-    def test_update_issue_no_id(self, patch_mock):
-        issue_tracker = GitHubIssueTracker()
-        issue = issue_tracker.update_issue(self.observation_1, None)
-        self.assertIsNone(issue)
-        patch_mock.assert_not_called()
-
-    @patch("requests.patch")
-    def test_update_issue_exception(self, patch_mock):
-        response = Response()
-        response.status_code = 404
-        response.reason = "unknown reason"
-        response.url = "https://api.github.com/repos/gh_project_1/issues/gh_1"
-        patch_mock.return_value = response
-        self.observation_1.issue_tracker_issue_id = "gh_1"
-        with self.assertRaises(HTTPError) as e:
-            issue_tracker = GitHubIssueTracker()
-            self.observation_1.product.issue_tracker_labels = "label_2,label_3"
-            issue = Issue(
+            Issue(
                 id="gh_1",
                 title="title_1",
                 description="description_1",
                 labels="label_1,label_2",
-            )
-            issue_tracker.update_issue(self.observation_1, issue)
-
-        self.assertEqual(
-            "404 Client Error: unknown reason for url: https://api.github.com/repos/gh_project_1/issues/gh_1",
-            str(e.exception),
-        )
-        patch_mock.assert_called_once_with(
-            url="https://api.github.com/repos/gh_project_1/issues/gh_1",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": "Bearer api_key_1",
-            },
-            data='{"title": "Critical vulnerability: \\"observation_1\\"", "body": "description_1\\n\\n**Branch:** branch_1\\n\\n**SecObserve observation:** [/#/observations/1/show](/#/observations/1/show)", "state": "open", "labels": ["label_2", "label_3", "label_1"]}',
-            timeout=60,
+                state=Issue_State.ISSUE_STATE_CLOSED,
+            ),
+            issue,
         )
 
-    @patch("requests.patch")
-    def test_update_issue_success(self, patch_mock):
-        patch_mock.return_value.status_code = 200
-        self.observation_1.issue_tracker_issue_id = "gh_1"
-        issue_tracker = GitHubIssueTracker()
-        self.observation_1.product.issue_tracker_labels = "label_2,label_3"
-        issue = Issue(
-            id="gh_1",
-            title="title_1",
-            description="description_1",
-            labels="label_1,label_2",
+    @patch(REQUEST_MODULE)
+    def test_find_issue_id_by_correlation_id_verifies_body(self, request_mock):
+        request_mock.return_value = FakeResponse(
+            {
+                "items": [
+                    {"number": "gh_9", "body": "unrelated"},
+                    {"number": "gh_42", "body": "<!-- secobserveobservation1 -->"},
+                ]
+            }
         )
 
-        issue_tracker.update_issue(self.observation_1, issue)
-
-        patch_mock.assert_called_once_with(
-            url="https://api.github.com/repos/gh_project_1/issues/gh_1",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": "Bearer api_key_1",
-            },
-            data='{"title": "Critical vulnerability: \\"observation_1\\"", "body": "description_1\\n\\n**Branch:** branch_1\\n\\n**SecObserve observation:** [/#/observations/1/show](/#/observations/1/show)", "state": "open", "labels": ["label_2", "label_3", "label_1"]}',
-            timeout=60,
+        issue_id = GitHubIssueTracker().find_issue_id_by_correlation_id(
+            self.observation_1.product, "secobserveobservation1"
         )
 
-    @patch("requests.patch")
-    def test_close_issue_no_id(self, patch_mock):
-        issue_tracker = GitHubIssueTracker()
-        issue = issue_tracker.close_issue(self.observation_1, None)
-        self.assertIsNone(issue)
-        patch_mock.assert_not_called()
+        self.assertEqual("gh_42", issue_id)
+        self.assertIn("secobserveobservation1", kwargs_q(request_mock))
 
-    @patch("requests.patch")
-    def test_close_issue_exception(self, patch_mock):
-        response = Response()
-        response.status_code = 404
-        response.reason = "unknown reason"
-        response.url = "https://api.github.com/repos/gh_project_1/issues/gh_1"
-        patch_mock.return_value = response
-        self.observation_1.issue_tracker_issue_id = "gh_1"
-        self.observation_1.product.issue_tracker_labels = "label_2,label_3"
+    @patch(REQUEST_MODULE)
+    def test_find_issue_id_without_match(self, request_mock):
+        request_mock.return_value = FakeResponse({"items": [{"number": "9", "body": "unrelated"}]})
+        self.assertIsNone(
+            GitHubIssueTracker().find_issue_id_by_correlation_id(self.observation_1.product, "secobserveobservation1")
+        )
+
+    @patch(REQUEST_MODULE)
+    def test_update_issue_reopens_with_issue_id_from_issue_object(self, request_mock):
+        request_mock.return_value = FakeResponse({"number": "gh_1"})
+        self.observation_1.issue_tracker_issue_id = ""  # adopted rows may not have the mirror yet
+        issue = Issue(id="gh_1", title="old", description="d", state=Issue_State.ISSUE_STATE_CLOSED)
+
+        GitHubIssueTracker().update_issue(self.observation_1, issue)
+
+        _, kwargs = request_mock.call_args
+        self.assertTrue(kwargs["url"].endswith("/issues/gh_1"))
+        self.assertEqual("open", json.loads(kwargs["data"])["state"])
+
+    @patch(REQUEST_MODULE)
+    def test_close_issue(self, request_mock):
+        request_mock.return_value = FakeResponse({"number": "gh_1"})
         self.observation_1.current_status = Status.STATUS_RESOLVED
-        with self.assertRaises(HTTPError) as e:
-            issue_tracker = GitHubIssueTracker()
-            issue = Issue(
-                id="gh_1",
-                title="title_1",
-                description="description_1",
-                labels="label_1,label_2",
-            )
-            issue_tracker.close_issue(self.observation_1, issue)
-
-        self.assertEqual(
-            "404 Client Error: unknown reason for url: https://api.github.com/repos/gh_project_1/issues/gh_1",
-            str(e.exception),
-        )
-        patch_mock.assert_called_once_with(
-            url="https://api.github.com/repos/gh_project_1/issues/gh_1",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": "Bearer api_key_1",
-            },
-            data='{"title": "Critical vulnerability: \\"observation_1\\"", "body": "description_1\\n\\n**Branch:** branch_1\\n\\n**SecObserve observation:** [/#/observations/1/show](/#/observations/1/show)\\n\\n**Observation status:** Resolved", "state": "closed", "labels": ["label_2", "label_3", "label_1"]}',
-            timeout=60,
-        )
-
-    @patch("requests.patch")
-    def test_close_issue_success(self, patch_mock):
-        patch_mock.return_value.status_code = 200
-        self.observation_1.issue_tracker_issue_id = "gh_1"
+        issue = Issue(id="gh_1", title="t", description="d", labels="label_9")
         self.observation_1.product.issue_tracker_labels = "label_2,label_3"
-        self.observation_1.current_status = Status.STATUS_RESOLVED
-        issue_tracker = GitHubIssueTracker()
+
+        GitHubIssueTracker().close_issue(self.observation_1, issue)
+
+        _, kwargs = request_mock.call_args
+        data = json.loads(kwargs["data"])
+        self.assertEqual("closed", data["state"])
+        self.assertIn("**Observation status:** Resolved", data["body"])
+        self.assertEqual(["label_2", "label_3", "label_9"], data["labels"])
+
+    @patch(REQUEST_MODULE)
+    def test_close_for_deleted_observation(self, request_mock):
+        request_mock.return_value = FakeResponse({})
+        issue = Issue(id="gh_1", title="t", description="description_1")
+
+        GitHubIssueTracker().close_issue_for_deleted_observation(self.observation_1.product, issue)
+
+        _, kwargs = request_mock.call_args
+        data = json.loads(kwargs["data"])
+        self.assertEqual("closed", data["state"])
+        self.assertTrue(data["body"].startswith("**--- Observation has been deleted ---**"))
+
+    @patch(REQUEST_MODULE)
+    def test_close_for_deleted_observation_is_idempotent(self, request_mock):
+        request_mock.return_value = FakeResponse({})
         issue = Issue(
             id="gh_1",
-            title="title_1",
-            description="description_1",
-            labels="label_1,label_2",
+            title="t",
+            description="**--- Observation has been deleted ---**\nold",
         )
 
-        issue_tracker.close_issue(self.observation_1, issue)
+        GitHubIssueTracker().close_issue_for_deleted_observation(self.observation_1.product, issue)
 
-        patch_mock.assert_called_once_with(
-            url="https://api.github.com/repos/gh_project_1/issues/gh_1",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": "Bearer api_key_1",
-            },
-            data='{"title": "Critical vulnerability: \\"observation_1\\"", "body": "description_1\\n\\n**Branch:** branch_1\\n\\n**SecObserve observation:** [/#/observations/1/show](/#/observations/1/show)\\n\\n**Observation status:** Resolved", "state": "closed", "labels": ["label_2", "label_3", "label_1"]}',
-            timeout=60,
-        )
+        _, kwargs = request_mock.call_args
+        data = json.loads(kwargs["data"])
+        self.assertEqual("closed", data["state"])
+        self.assertNotIn("body", data)
 
-    @patch("requests.patch")
-    def test_close_issue_for_deleted_observation_exception(self, patch_mock):
-        response = Response()
-        response.status_code = 404
-        response.reason = "unknown reason"
-        response.url = "https://api.github.com/repos/gh_project_1/issues/gh_1"
-        patch_mock.return_value = response
-        self.observation_1.product.issue_tracker_labels = "label_2,label_3"
-        with self.assertRaises(HTTPError) as e:
-            issue_tracker = GitHubIssueTracker()
-            issue = Issue(
-                id="gh_1",
-                title="title_1",
-                description="description_1",
-                labels="label_1,label_2",
-            )
-            issue_tracker.close_issue_for_deleted_observation(self.observation_1.product, issue)
+    @patch(REQUEST_MODULE)
+    def test_uncertain_status_raises_uncertain_error(self, request_mock):
+        request_mock.side_effect = IssueTrackerUncertainError("503")
+        with self.assertRaises(IssueTrackerUncertainError):
+            GitHubIssueTracker().create_issue(self.observation_1)
 
-        self.assertEqual(
-            "404 Client Error: unknown reason for url: https://api.github.com/repos/gh_project_1/issues/gh_1",
-            str(e.exception),
-        )
-        patch_mock.assert_called_once_with(
-            url="https://api.github.com/repos/gh_project_1/issues/gh_1",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": "Bearer api_key_1",
-            },
-            data='{"body": "**--- Observation has been deleted ---**\\n\\ndescription_1", "state": "closed", "labels": ["label_2", "label_3", "label_1"]}',
-            timeout=60,
-        )
-
-    @patch("requests.patch")
-    def test_close_issue_for_deleted_observation_success(self, patch_mock):
-        patch_mock.return_value.status_code = 200
-        self.observation_1.product.issue_tracker_labels = "label_2,label_3"
-        issue_tracker = GitHubIssueTracker()
-        issue = Issue(
-            id="gh_1",
-            title="title_1",
-            description="description_1",
-            labels="label_1,label_2",
-        )
-
-        issue_tracker.close_issue_for_deleted_observation(self.observation_1.product, issue)
-
-        patch_mock.assert_called_once_with(
-            url="https://api.github.com/repos/gh_project_1/issues/gh_1",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": "Bearer api_key_1",
-            },
-            data='{"body": "**--- Observation has been deleted ---**\\n\\ndescription_1", "state": "closed", "labels": ["label_2", "label_3", "label_1"]}',
-            timeout=60,
-        )
+    @patch(REQUEST_MODULE)
+    def test_deterministic_status_raises_deterministic_error(self, request_mock):
+        request_mock.side_effect = IssueTrackerDeterministicError("403")
+        with self.assertRaises(IssueTrackerDeterministicError):
+            GitHubIssueTracker().get_issue(self.observation_1.product, "gh_1")
 
     def test_get_frontend_issue_url(self):
-        issue_tracker = GitHubIssueTracker()
-        frontend_issue_url = issue_tracker.get_frontend_issue_url(self.observation_1.product, "gh_1")
-        self.assertEqual("https://github.com/gh_project_1/issues/gh_1", frontend_issue_url)
+        url = GitHubIssueTracker().get_frontend_issue_url(self.observation_1.product, "gh_1")
+        self.assertEqual("https://github.com/gh_project_1/issues/gh_1", url)
 
-    @patch("requests.post")
-    def test_create_issue_github_enterprise(self, post_mock):
-        self.observation_1.product.issue_tracker_base_url = "https://github.example.com/api/v3"
-        post_mock.return_value.raise_for_status.return_value = None
-        post_mock.return_value.json.return_value = {"number": "gh_1"}
 
-        issue_tracker = GitHubIssueTracker()
-        issue_id = issue_tracker.create_issue(self.observation_1)
-
-        self.assertEqual("gh_1", issue_id)
-        self.assertEqual(
-            "https://github.example.com/api/v3/repos/gh_project_1/issues",
-            post_mock.call_args.kwargs["url"],
-        )
-
-    def test_get_issue_tracker_base_url_github_com(self):
-        self.observation_1.product.issue_tracker_base_url = "https://api.github.com"
-        issue_tracker = GitHubIssueTracker()
-        self.assertEqual(
-            "https://api.github.com/repos/gh_project_1/issues",
-            issue_tracker._get_issue_tracker_base_url(self.observation_1.product),
-        )
-
-    def test_get_frontend_issue_url_github_enterprise(self):
-        self.observation_1.product.issue_tracker_base_url = "https://github.example.com/api/v3/"
-        issue_tracker = GitHubIssueTracker()
-        frontend_issue_url = issue_tracker.get_frontend_issue_url(self.observation_1.product, "gh_1")
-        self.assertEqual("https://github.example.com/gh_project_1/issues/gh_1", frontend_issue_url)
+def kwargs_q(request_mock) -> str:
+    return request_mock.call_args.kwargs["params"]["q"]

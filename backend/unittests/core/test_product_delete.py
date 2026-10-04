@@ -16,6 +16,7 @@ from application.core.models import (
 )
 from application.core.types import Status
 from application.import_observations.models import Api_Configuration, Parser
+from application.issue_tracker.models import Issue_Tracker_Status
 from application.licenses.models import License_Component
 from application.licenses.types import License_Policy_Evaluation_Result
 from application.notifications.models import Product_Notification
@@ -31,7 +32,7 @@ class TestProductDeleteCascade(BaseTestCase):
         self.external_user = User.objects.create(username="delete-external@example.com", is_external=True)
         self.parser = Parser.objects.create(name="delete-parser")
 
-    @patch("application.core.signals.push_deleted_observation_to_issue_tracker")
+    @patch("application.core.signals.register_observation_deleted")
     def test_delete_product_cascades_all_product_records_after_commit(self, mock_issue_tracker) -> None:
         product = self._create_product_with_records("product")
         product_id = product.pk
@@ -49,10 +50,10 @@ class TestProductDeleteCascade(BaseTestCase):
         self.assertFalse(Api_Configuration.objects.filter(product_id=product_id).exists())
         self.assertFalse(Rule.objects.filter(product_id=product_id).exists())
         self.assertFalse(OpenVEX.objects.filter(product_id=product_id).exists())
-        self.assertEqual(1, len(callbacks))
+        self.assertEqual(0, len(callbacks))
         mock_issue_tracker.assert_called_once()
 
-    @patch("application.core.signals.push_deleted_observation_to_issue_tracker")
+    @patch("application.core.signals.register_observation_deleted")
     def test_delete_product_group_cascades_multiple_children_after_commit(self, mock_issue_tracker) -> None:
         product_group = Product.objects.create(name="product_group", is_product_group=True)
         self._add_blocking_records(product_group, "product_group")
@@ -66,7 +67,7 @@ class TestProductDeleteCascade(BaseTestCase):
         self.assertFalse(Product.objects.filter(pk__in=deleted_ids).exists())
         self.assertFalse(Observation.objects.filter(product_id__in=deleted_ids).exists())
         self.assertFalse(License_Component.objects.filter(product_id__in=deleted_ids).exists())
-        self.assertEqual(3, len(callbacks))
+        self.assertEqual(0, len(callbacks))
         self.assertEqual(3, mock_issue_tracker.call_count)
 
     def test_related_records_remain_protected_outside_product_cascade(self) -> None:
@@ -81,8 +82,7 @@ class TestProductDeleteCascade(BaseTestCase):
                 with self.assertRaises(RestrictedError):
                     related_object.delete()
 
-    @patch("application.core.signals.push_deleted_observation_to_issue_tracker")
-    def test_product_delete_signal_failure_rolls_back_cascade(self, mock_issue_tracker) -> None:
+    def test_product_delete_signal_failure_rolls_back_cascade(self) -> None:
         product = self._create_product_with_records("product")
         product_id = product.pk
 
@@ -105,10 +105,9 @@ class TestProductDeleteCascade(BaseTestCase):
         self.assertTrue(Observation.objects.filter(product_id=product_id).exists())
         self.assertTrue(License_Component.objects.filter(product_id=product_id).exists())
         self.assertEqual([], callbacks)
-        mock_issue_tracker.assert_not_called()
+        self.assertEqual(0, Issue_Tracker_Status.objects.filter(product_id=product_id).count())
 
-    @patch("application.core.signals.push_deleted_observation_to_issue_tracker")
-    def test_group_delete_signal_failure_rolls_back_cascade(self, mock_issue_tracker) -> None:
+    def test_group_delete_signal_failure_rolls_back_cascade(self) -> None:
         product_group = Product.objects.create(name="product_group", is_product_group=True)
         first_child = self._create_product_with_records("first_child", product_group)
         second_child = self._create_product_with_records("second_child", product_group)
@@ -133,7 +132,7 @@ class TestProductDeleteCascade(BaseTestCase):
         self.assertTrue(Observation.objects.filter(product_id=first_child.pk).exists())
         self.assertTrue(License_Component.objects.filter(product_id=first_child.pk).exists())
         self.assertEqual([], callbacks)
-        mock_issue_tracker.assert_not_called()
+        self.assertEqual(0, Issue_Tracker_Status.objects.filter(product_id__in=deleted_ids).count())
 
     def _create_product_with_records(self, name: str, product_group: Product | None = None) -> Product:
         product = Product.objects.create(name=name, product_group=product_group)

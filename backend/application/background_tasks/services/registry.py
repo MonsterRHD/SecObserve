@@ -15,6 +15,9 @@ PERIODIC_TASKS: dict[str, str] = {
     "Calculate product metrics": (
         "application.background_tasks.periodic_tasks.metrics_tasks.task_calculate_product_metrics"
     ),
+    "Synchronize issue tracker issues": (
+        "application.background_tasks.periodic_tasks.issue_tracker_tasks.task_synchronize_issue_tracker_issues"
+    ),
 }
 
 

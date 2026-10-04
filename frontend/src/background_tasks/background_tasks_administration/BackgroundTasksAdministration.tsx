@@ -5,6 +5,8 @@ import { Link, matchPath, useLocation } from "react-router-dom";
 
 import administration from ".";
 import ListHeader from "../../commons/layout/ListHeader";
+import issue_tracker_sync from "../issue_tracker_sync";
+import IssueTrackerSyncEmbeddedList from "../issue_tracker_sync/IssueTrackerSyncEmbeddedList";
 import periodic_tasks from "../periodic_tasks";
 import PeriodicTaskEmbeddedList from "../periodic_tasks/PeriodicTaskEmbeddedList";
 import statistics from "../statistics";
@@ -52,7 +54,11 @@ function a11yProps(index: number) {
 }
 
 export default function BackgroundTasksAdministration() {
-    const routeMatch = useRouteMatch(["/background_tasks/statistics", "/background_tasks/periodic_tasks"]);
+    const routeMatch = useRouteMatch([
+        "/background_tasks/statistics",
+        "/background_tasks/periodic_tasks",
+        "/background_tasks/issue_tracker_sync",
+    ]);
     function currentTab(): number {
         switch (routeMatch?.pattern?.path) {
             case "/background_tasks/statistics": {
@@ -60,6 +66,9 @@ export default function BackgroundTasksAdministration() {
             }
             case "/background_tasks/periodic_tasks": {
                 return 1;
+            }
+            case "/background_tasks/issue_tracker_sync": {
+                return 2;
             }
             default: {
                 return 0;
@@ -88,6 +97,14 @@ export default function BackgroundTasksAdministration() {
                         {...a11yProps(1)} // nosemgrep: typescript.react.best-practice.react-props-spreading.react-props-spreading
                         // nosemgrep because the props are well defined in the import
                     />
+                    <Tab
+                        label="Issue Tracker"
+                        icon={<issue_tracker_sync.icon />}
+                        to="/background_tasks/issue_tracker_sync"
+                        component={Link}
+                        {...a11yProps(2)} // nosemgrep: typescript.react.best-practice.react-props-spreading.react-props-spreading
+                        // nosemgrep because the props are well defined in the import
+                    />
                 </Tabs>
                 <Divider />
                 <CustomTabPanel value={currentTab()} index={0}>
@@ -95,6 +112,9 @@ export default function BackgroundTasksAdministration() {
                 </CustomTabPanel>
                 <CustomTabPanel value={currentTab()} index={1}>
                     <PeriodicTaskEmbeddedList />
+                </CustomTabPanel>
+                <CustomTabPanel value={currentTab()} index={2}>
+                    <IssueTrackerSyncEmbeddedList />
                 </CustomTabPanel>
             </Paper>
         </Fragment>

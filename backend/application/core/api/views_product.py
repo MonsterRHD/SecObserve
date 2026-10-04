@@ -71,7 +71,6 @@ from application.core.api.serializers_product import (
 )
 from application.core.models import (
     Branch,
-    Observation,
     Product,
     Product_Authorization_Group_Member,
     Product_Member,
@@ -104,8 +103,8 @@ from application.core.services.product_api_token import (
     revoke_product_api_token,
 )
 from application.core.types import Status
-from application.issue_tracker.services.issue_tracker import (
-    push_observations_to_issue_tracker,
+from application.issue_tracker.services.issue_sync_registration import (
+    register_product_resync,
 )
 from application.licenses.api.serializers import LicenseComponentBulkDeleteSerializer
 from application.licenses.services.export_license_components import (
@@ -472,8 +471,10 @@ class ProductViewSet(ProductCountAnnotationsMixin, ProductDeletionActionsMixin, 
         product = self.__get_product(pk)
         user_has_permission_or_403(product, Permissions.Product_Edit)
 
-        observations = Observation.objects.filter(product=product)
-        push_observations_to_issue_tracker(product, set(observations))
+        # Force a full reconciliation: already synchronized rows are bumped as well, so
+        # issues that were closed or deleted in the issue tracker are reopened/recreated
+        # and failed synchronizations get another chance.
+        register_product_resync(product)
 
         return Response(status=HTTP_204_NO_CONTENT)
 

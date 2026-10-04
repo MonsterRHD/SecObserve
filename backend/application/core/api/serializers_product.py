@@ -250,6 +250,35 @@ class ProductCoreSerializer(ModelSerializer):
 
         return value
 
+    def update(self, instance: Product, validated_data: dict) -> Product:
+        was_issue_tracker_active = instance.issue_tracker_active
+        previous_minimum_severity = instance.issue_tracker_minimum_severity
+        previous_default_branch_id = instance.repository_default_branch_id
+
+        product = super().update(instance, validated_data)
+
+        if not product.is_product_group:
+            # Imported here to avoid an import cycle between the core API and the issue
+            # tracker services.
+            from application.issue_tracker.services.issue_sync_registration import (
+                close_all_for_deactivation,
+                register_product_resync,
+            )
+
+            if was_issue_tracker_active and not product.issue_tracker_active:
+                # All managed issues are closed when the integration is deactivated.
+                close_all_for_deactivation(product)
+            elif product.issue_tracker_active and (
+                not was_issue_tracker_active
+                or product.issue_tracker_minimum_severity != previous_minimum_severity
+                or product.repository_default_branch_id != previous_default_branch_id
+            ):
+                # Activation, a new minimum severity or a new default branch change which
+                # observations qualify for an open issue, so all observations are reconciled.
+                register_product_resync(product)
+
+        return product
+
     def to_representation(self, instance: Product) -> dict[str, Any]:
         data = super().to_representation(instance)
 

@@ -36,6 +36,7 @@ from application.import_observations.api.views import (
     ParserViewSet,
     VulnerabilityCheckViewSet,
 )
+from application.issue_tracker.api.views import IssueTrackerStatusViewSet
 from application.licenses.api.views import (
     ConcludedLicenseViewSet,
     LicenseComponentEvidenceViewSet,
@@ -163,5 +164,10 @@ router.register(
     basename="license_policy_authorization_group_members",
 )
 router.register("periodic_tasks", PeriodicTaskViewSet, basename="periodic_tasks")
+router.register(
+    "issue_tracker_statuses",
+    IssueTrackerStatusViewSet,
+    basename="issue_tracker_statuses",
+)
 app_name = "api"
 urlpatterns = router.urls

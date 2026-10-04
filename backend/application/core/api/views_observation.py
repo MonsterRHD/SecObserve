@@ -107,6 +107,7 @@ class ObservationViewSet(ModelViewSet):
             .select_related("branch")
             .select_related("parser")
             .select_related("origin_service")
+            .select_related("issue_tracker_status")
         )
 
     def perform_destroy(self, instance: Observation) -> None:

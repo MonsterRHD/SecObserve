@@ -2,7 +2,11 @@ from unittest.mock import patch
 
 from application.core.models import Observation, Service
 from application.core.types import Severity
-from application.issue_tracker.issue_trackers.base_issue_tracker import BaseIssueTracker
+from application.issue_tracker.issue_trackers.base_issue_tracker import (
+    BaseIssueTracker,
+    Issue,
+    Issue_State,
+)
 from unittests.base_test_case import BaseTestCase
 
 
@@ -57,7 +61,8 @@ class TestBaseIssueTracker(BaseTestCase):
         self.observation_1.origin_source_file = "application.py"
         title = issue_tracker._get_title(self.observation_1)
         self.assertEqual(
-            'High vulnerability: "observation_1" in service_1 / component_1:1.0.0 / image_1:1.0.0 / hostname_1.example.com / application.py',
+            'High vulnerability: "observation_1" in service_1 / component_1:1.0.0 / '
+            "image_1:1.0.0 / hostname_1.example.com / application.py",
             title,
         )
 
@@ -74,7 +79,9 @@ class TestBaseIssueTracker(BaseTestCase):
 
 **Branch:** branch_1
 
-**SecObserve observation:** [http://localhost:3000#/observations/1/show](http://localhost:3000#/observations/1/show)"""
+**SecObserve observation:** [http://localhost:3000#/observations/1/show](http://localhost:3000#/observations/1/show)
+
+<!-- secobserveobservation1 -->"""
         self.assertEqual(expected_description, description)
         base_url_mock.assert_called_once()
 
@@ -88,9 +95,30 @@ class TestBaseIssueTracker(BaseTestCase):
 
         expected_description = """description_2
 
-**SecObserve observation:** [http://localhost:3000#/observations/2/show](http://localhost:3000#/observations/2/show)"""
+**SecObserve observation:** [http://localhost:3000#/observations/2/show](http://localhost:3000#/observations/2/show)
+
+<!-- secobserveobservation2 -->"""
         self.assertEqual(expected_description, description)
         base_url_mock.assert_called_once()
+
+    def test_correlation_token_and_marker(self):
+        issue_tracker = BaseIssueTracker()
+        self.observation_1.pk = 7
+        self.assertEqual("secobserveobservation7", issue_tracker.get_correlation_token(self.observation_1))
+        self.assertEqual(
+            "<!-- secobserveobservation7 -->",
+            issue_tracker.get_correlation_marker(self.observation_1),
+        )
+        self.assertEqual(
+            "<!-- secobserveobservation9 -->",
+            issue_tracker.get_correlation_marker_for_id(9),
+        )
+
+    def test_issue_defaults(self):
+        issue = Issue(id="1", title="title")
+        self.assertEqual(Issue_State.ISSUE_STATE_OPEN, issue.state)
+        self.assertIsNone(issue.description)
+        self.assertIsNone(issue.labels)
 
     def test_get_description_for_deleted_observation_without_description(self):
         issue_tracker = BaseIssueTracker()
@@ -110,14 +138,19 @@ None"""
 original_description"""
         self.assertEqual(expected_description, description)
 
+    def test_already_has_deletion_note(self):
+        issue_tracker = BaseIssueTracker()
+        without_note = Issue(id="1", title="t", description="body")
+        with_note = Issue(id="2", title="t", description="**--- Observation has been deleted ---**\nbody")
+        self.assertFalse(issue_tracker._already_has_deletion_note(without_note))
+        self.assertTrue(issue_tracker._already_has_deletion_note(with_note))
+
     def test_normalize_base_url_with_trailing_slash(self):
         issue_tracker = BaseIssueTracker()
         base_url = issue_tracker._normalize_base_url("http://localhost:3000/")
-
         self.assertEqual("http://localhost:3000", base_url)
 
     def test_normalize_base_url_without_trailing_slash(self):
         issue_tracker = BaseIssueTracker()
         base_url = issue_tracker._normalize_base_url("http://localhost:3000")
-
         self.assertEqual("http://localhost:3000", base_url)

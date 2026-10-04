@@ -1,8 +1,7 @@
 import logging
 from typing import Any
 
-from django.db import transaction
-from django.db.models.signals import post_delete, post_save, pre_save
+from django.db.models.signals import post_delete, post_save, pre_delete, pre_save
 from django.dispatch import receiver
 from huey.contrib.djhuey import lock_task, on_commit_task
 
@@ -18,8 +17,8 @@ from application.core.services.observation import (
     set_product_flags,
 )
 from application.core.services.security_gate import check_security_gate
-from application.issue_tracker.services.issue_tracker import (
-    push_deleted_observation_to_issue_tracker,
+from application.issue_tracker.services.issue_sync_registration import (
+    register_observation_deleted,
 )
 
 logger = logging.getLogger("secobserve.core")
@@ -33,15 +32,15 @@ def observation_pre_save(sender: Any, instance: Observation, **kwargs: Any) -> N
     set_product_flags(instance)
 
 
-@receiver(post_delete, sender=Observation)
-def observation_post_delete(
+@receiver(pre_delete, sender=Observation)
+def observation_pre_delete(
     sender: Any, instance: Observation, **kwargs: Any  # pylint: disable=unused-argument
 ) -> None:
     # sender is needed according to Django documentation
-    product = instance.product
-    issue_tracker_issue_id = instance.issue_tracker_issue_id
-    user = get_current_user()
-    transaction.on_commit(lambda: push_deleted_observation_to_issue_tracker(product, issue_tracker_issue_id, user))
+    # Registers the DELETED desired state in the same transaction, before the observation
+    # row is removed. The status row survives the deletion (its observation foreign key is
+    # set to null) and drives the deletion note and the close in the issue tracker.
+    register_observation_deleted(instance)
 
 
 @receiver(post_delete, sender=Product)

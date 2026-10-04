@@ -627,6 +627,7 @@ def _get_excludes():
     return [
         "pk",
         "objects",
+        "issue_tracker_status",
         "unsaved_references",
         "unsaved_evidences",
         "NUMERICAL_SEVERITIES",

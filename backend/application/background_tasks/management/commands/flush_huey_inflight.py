@@ -22,6 +22,18 @@ class Command(BaseCommand):
     def handle(self, *args: Any, **options: Any) -> None:
         self._flush_periodic_tasks()
         self._flush_inflight()
+        self._recover_issue_tracker_synchronizations()
+
+    def _recover_issue_tracker_synchronizations(self) -> None:
+        # Issue tracker synchronizations use the application database as their outbox.
+        # Rows that were IN_PROGRESS when the container was killed must be requeued, so
+        # that unconfirmed synchronizations continue after the restart.
+        from application.issue_tracker.services.issue_sync_dispatcher import (
+            recover_after_restart,
+        )
+
+        recovered = recover_after_restart()
+        logger.info("Requeued %s issue tracker synchronizations that were still in progress", recovered)
 
     def _flush_periodic_tasks(self) -> None:
         # so_periodic_task() writes the entry before the task runs and updates it afterwards, so a

@@ -83,6 +83,7 @@ class TestPeriodicTaskRun(BaseTestCase):
             "Import EPSS and cvss-bt",
             "Import SPDX licenses",
             "Import observations from API configurations, OSV and VulnerableCode",
+            "Synchronize issue tracker issues",
         ]
         self.assertEqual(expected_tasks, response.data["tasks"])
 

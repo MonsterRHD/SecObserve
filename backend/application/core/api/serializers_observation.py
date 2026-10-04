@@ -56,10 +56,32 @@ from application.core.types import (
 from application.import_observations.api.serializers import ParserSerializer
 from application.import_observations.models import Parser
 from application.import_observations.types import Parser_Type
+from application.issue_tracker.models import Issue_Tracker_Status
 from application.issue_tracker.services.issue_tracker import (
     issue_tracker_factory,
     push_observation_to_issue_tracker,
 )
+
+
+def get_issue_tracker_sync_state(observation: Observation) -> str:
+    try:
+        return observation.issue_tracker_status.sync_state
+    except Issue_Tracker_Status.DoesNotExist:
+        return ""
+
+
+def get_issue_tracker_sync_last_error(observation: Observation) -> str:
+    try:
+        return observation.issue_tracker_status.last_error
+    except Issue_Tracker_Status.DoesNotExist:
+        return ""
+
+
+def get_issue_tracker_sync_next_attempt_at(observation: Observation):
+    try:
+        return observation.issue_tracker_status.next_attempt_at
+    except Issue_Tracker_Status.DoesNotExist:
+        return None
 
 
 class NestedReferenceSerializer(ModelSerializer):
@@ -86,6 +108,9 @@ class EvidenceSerializer(ModelSerializer):
 
 
 class ObservationSerializer(ModelSerializer):
+    issue_tracker_sync_state = SerializerMethodField()
+    issue_tracker_sync_last_error = SerializerMethodField()
+    issue_tracker_sync_next_attempt_at = SerializerMethodField()
     product_data = NestedProductSerializer(source="product")
     branch_name = SerializerMethodField()
     parser_data = ParserSerializer(source="parser")
@@ -129,6 +154,15 @@ class ObservationSerializer(ModelSerializer):
 
         return issue_url
 
+    def get_issue_tracker_sync_state(self, observation: Observation) -> str:
+        return get_issue_tracker_sync_state(observation)
+
+    def get_issue_tracker_sync_last_error(self, observation: Observation) -> str:
+        return get_issue_tracker_sync_last_error(observation)
+
+    def get_issue_tracker_sync_next_attempt_at(self, observation: Observation):
+        return get_issue_tracker_sync_next_attempt_at(observation)
+
     def get_assessment_needs_approval(self, observation: Observation) -> Optional[dict]:
         current_observation_log = get_current_observation_log(observation)
         if (
@@ -158,6 +192,9 @@ class ObservationTitleSerializer(ModelSerializer):
 
 
 class ObservationListSerializer(ModelSerializer):
+    issue_tracker_sync_state = SerializerMethodField()
+    issue_tracker_sync_last_error = SerializerMethodField()
+    issue_tracker_sync_next_attempt_at = SerializerMethodField()
     product_data = NestedProductListSerializer(source="product")
     branch_name = SerializerMethodField()
     parser_data = ParserSerializer(source="parser")
@@ -181,6 +218,15 @@ class ObservationListSerializer(ModelSerializer):
 
     def get_branch_name(self, observation: Observation) -> str:
         return get_branch_name(observation)
+
+    def get_issue_tracker_sync_state(self, observation: Observation) -> str:
+        return get_issue_tracker_sync_state(observation)
+
+    def get_issue_tracker_sync_last_error(self, observation: Observation) -> str:
+        return get_issue_tracker_sync_last_error(observation)
+
+    def get_issue_tracker_sync_next_attempt_at(self, observation: Observation):
+        return get_issue_tracker_sync_next_attempt_at(observation)
 
     def get_scanner_name(self, observation: Observation) -> str:
         return get_scanner_name(observation)
